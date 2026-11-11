@@ -1,0 +1,10 @@
+{
+  "name": "royal-kitchen-backend",
+  "version": "1.0.0",
+  "description": "Royal Kitchen ordering, table and payment-verification server (no dependencies)",
+  "main": "server.js",
+  "scripts": { "start": "node server.js", "test": "node test.js" },
+  "engines": { "node": ">=22.5.0" },
+  "license": "UNLICENSED",
+  "private": true
+}
