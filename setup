@@ -1,0 +1,106 @@
+#!/usr/bin/env bash
+# Royal Kitchen: one-time setup for a fresh Ubuntu 24.04 server (Hetzner etc.).
+# Run as root from inside the uploaded royal-kitchen-backend folder:
+#     bash deploy/setup.sh                 (uses a free address like 1-2-3-4.sslip.io)
+#     bash deploy/setup.sh royalkitchen.pk (uses your own domain; point its A record to this server first)
+set -euo pipefail
+[ "$(id -u)" -eq 0 ] || { echo "Run as root (use: sudo bash deploy/setup.sh)"; exit 1; }
+[ -f server.js ] || { echo "Run this from inside the royal-kitchen-backend folder"; exit 1; }
+IP=$(curl -4 -fsS https://ifconfig.me || hostname -I | awk '{print $1}')
+DOMAIN="${1:-$(echo "$IP" | tr . -).sslip.io}"
+export DEBIAN_FRONTEND=noninteractive
+
+apt-get update -y
+apt-get install -y curl ca-certificates gnupg ufw openssl debian-keyring debian-archive-keyring apt-transport-https
+
+# Node.js 22 (needed for the built-in SQLite)
+if ! command -v node >/dev/null || [ "$(node -p 'process.versions.node.split(".")[0]')" -lt 22 ]; then
+  curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
+  apt-get install -y nodejs
+fi
+
+# Caddy web server (automatic HTTPS)
+if ! command -v caddy >/dev/null; then
+  curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | gpg --dearmor --yes -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+  curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' | tee /etc/apt/sources.list.d/caddy-stable.list >/dev/null
+  apt-get update -y
+  apt-get install -y caddy
+fi
+
+# App files and data folders
+id rk >/dev/null 2>&1 || useradd --system --home /opt/royal-kitchen --shell /usr/sbin/nologin rk
+mkdir -p /opt/royal-kitchen /var/lib/royal-kitchen /var/backups/royal-kitchen
+cp -r server.js backup.js menu.json package.json public /opt/royal-kitchen/
+chown -R rk:rk /var/lib/royal-kitchen /var/backups/royal-kitchen
+
+# Settings (first install only). The Owner password is generated here and shown once at the end.
+ENVF=/etc/royal-kitchen.env; PW=""
+if [ ! -f "$ENVF" ]; then
+  PW=$(openssl rand -base64 24 | tr -dc 'A-Za-z0-9' | head -c 16)
+  cat >"$ENVF" <<EOT
+PORT=3000
+DATA_DIR=/var/lib/royal-kitchen
+COOKIE_SECURE=1
+TRUST_PROXY=1
+PUBLIC_URL=https://$DOMAIN
+ADMIN_USER=owner
+ADMIN_PASSWORD=$PW
+EOT
+  chmod 600 "$ENVF"
+fi
+
+cat >/etc/systemd/system/royal-kitchen.service <<'EOT'
+[Unit]
+Description=Royal Kitchen server
+After=network.target
+[Service]
+User=rk
+EnvironmentFile=/etc/royal-kitchen.env
+WorkingDirectory=/opt/royal-kitchen
+ExecStart=/usr/bin/node --no-warnings /opt/royal-kitchen/server.js
+Restart=always
+RestartSec=3
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/royal-kitchen
+PrivateTmp=true
+[Install]
+WantedBy=multi-user.target
+EOT
+
+# Caddy: HTTPS in front of the app. The real visitor IP is passed on; any spoofed Netlify header is removed.
+cat >/etc/caddy/Caddyfile <<EOT
+$DOMAIN {
+	encode gzip
+	reverse_proxy 127.0.0.1:3000 {
+		header_up X-Forwarded-For {remote_host}
+		header_up -X-Nf-Client-Connection-Ip
+	}
+}
+EOT
+
+# Daily backup at 03:30
+cat >/etc/cron.d/royal-kitchen-backup <<'EOT'
+DATA_DIR=/var/lib/royal-kitchen
+BACKUP_DIR=/var/backups/royal-kitchen
+30 3 * * * rk /usr/bin/node --no-warnings /opt/royal-kitchen/backup.js >> /var/log/royal-kitchen-backup.log 2>&1
+EOT
+touch /var/log/royal-kitchen-backup.log; chown rk:rk /var/log/royal-kitchen-backup.log
+
+# Firewall: only SSH, HTTP and HTTPS
+ufw allow OpenSSH >/dev/null; ufw allow 80/tcp >/dev/null; ufw allow 443/tcp >/dev/null; ufw --force enable >/dev/null
+
+systemctl daemon-reload
+systemctl enable --now royal-kitchen
+systemctl restart caddy
+sleep 4
+# The first-run password is no longer needed in the file once the Owner exists
+sed -i '/^ADMIN_PASSWORD=/d' "$ENVF"
+
+echo
+echo "================ DONE ================"
+echo "Website:  https://$DOMAIN/"
+echo "Admin:    https://$DOMAIN/admin"
+if [ -n "$PW" ]; then echo "Login:    owner / $PW   <-- write this down now, it is not shown again"; else echo "Login:    (existing Owner account, unchanged)"; fi
+echo "Check:    systemctl status royal-kitchen    |    journalctl -u royal-kitchen -n 50"
+echo "======================================"
