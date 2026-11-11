@@ -1,0 +1,54 @@
+# Royal Kitchen Backend (Step 1: server and database)
+
+No `npm install` needed. The server has **zero dependencies** and uses Node's built-in SQLite.
+
+## Requirements
+- Node.js **22.5 or newer** (`node -v` to check)
+- A server that can run Node continuously (a VPS, Render, Railway, Fly.io, etc.). Static hosts such as Netlify cannot run this.
+
+## Run
+```
+node server.js
+```
+On the very first start it creates the database, the 50 tables (Gents 1-25, Family 1-25), loads the 176 menu items from `menu.json`, and creates an **Owner** account. The Owner password is printed **once** in the console. To choose your own, set `ADMIN_USER` and `ADMIN_PASSWORD` before the first start.
+
+## Test
+```
+node test.js
+```
+Starts a temporary server and database and runs 45 checks (login, roles, tables, payments, prices, audit log). Last run: 45 passed, 0 failed.
+
+## Environment variables
+| Name | Purpose | Default |
+|---|---|---|
+| PORT | Port | 3000 |
+| DATA_DIR | Database and uploaded screenshots folder | ./data |
+| PUBLIC_URL | Your website address (needed for the screenshot link in WhatsApp messages), e.g. https://royalkitchen.pk | none |
+| COOKIE_SECURE | Set to `1` when the site uses HTTPS | off |
+| HOLD_MINUTES | Minutes an unpaid order/table is held before release | 15 |
+| ADMIN_USER / ADMIN_PASSWORD | First Owner account | owner / random |
+
+Back up the `DATA_DIR` folder regularly (it holds the database and payment screenshots). Put the server behind HTTPS (Cloudflare, Nginx, or your host's built-in HTTPS).
+
+## What is built
+- **Roles:** OWNER, MANAGER, DEVELOPER. Passwords hashed with scrypt, sessions in HttpOnly cookies, 5 failed logins lock that user for 15 minutes, CSRF header check.
+- **Tables:** 50 tables with statuses available / reserved / occupied / waiting / cleaning. A table is taken atomically, so two customers cannot book the same one. Unpaid holds expire automatically.
+- **Orders:** the server calculates all prices from the database (a customer cannot send their own prices). 3% dine-in service charge on eligible items only; delivery = Rs. 30 per 3 km (or part); opening hours 10 AM to 2 AM (Pakistan time) enforced. Orders keep a price snapshot, so later price changes never alter old orders.
+- **100% advance payment:** screenshot upload (JPG/PNG/WEBP, max 5 MB). Staff must enter the bank amount and bank reference; approval is refused if the amount differs from the bill, and one bank reference can approve only one payment. Rejection needs a reason, the customer can resubmit, and all old screenshots are kept.
+- **Screenshot checks (honest limits):** detects identical re-used screenshots and editing/AI software markers in file metadata. It does **not** read the amount, date or reference from the image (no OCR), and it can never approve a payment. Only staff can, after checking the real bank record.
+- **WhatsApp:** the confirmed-order message is only available after approval and contains a signed 7-day screenshot link. A normal wa.me link cannot attach an image, so the link is used instead.
+- **Admin API:** orders, payment approve/reject/refund, table status, product add/edit/delete/image, users, settings, dashboard stats, audit log (who approved, who changed which price from what to what).
+- Managers can edit products or prices only if the Owner turns on `manager_products` / `manager_prices` in settings.
+
+## Still to do (next steps)
+1. Real-phone testing of the full customer flow.
+2. Optional: OCR (reading amount/date/reference from screenshots) and WhatsApp Business API.
+
+## Admin panel
+Open `http://localhost:3000/admin` (file: `public/admin.html`). Screens: Dashboard (date filters, alerts), Orders & Payments (screenshot review, approve/reject, order status), Tables (50 tables, colour by status), Products (add, edit, price, photo, delete), Users & Roles (Owner only), Settings, Activity Log. Menu items shown depend on the role.
+
+## Customer website
+`public/index.html` is the customer app. When served by this server (open `http://localhost:3000/`) it switches to **server mode** automatically: menu and prices come from the database (so admin price changes and product photos show instantly), tables show live status (taken tables are greyed out), orders are created on the server, the payment screenshot is uploaded, and the customer sees a live status window (pending, rejected with reason and re-upload, confirmed with a WhatsApp button). If the server cannot be reached, the same page still works on its own and sends orders by WhatsApp only.
+
+## Sending the order and screenshot to the restaurant WhatsApp
+After the customer uploads the payment screenshot, the order window shows **Send order + screenshot link on WhatsApp**. It opens the restaurant chat with the full order and a secure 7-day link to the screenshot, clearly marked "PAYMENT PENDING VERIFICATION - NOT CONFIRMED" (needs `PUBLIC_URL`). On phones that support it, a second button **Share screenshot image** sends the actual image through the phone's share menu (the customer picks the Royal Kitchen chat). A normal wa.me link cannot attach an image by itself. Fully automatic sending (no customer tap) needs the WhatsApp Business Cloud API, which is not set up.
